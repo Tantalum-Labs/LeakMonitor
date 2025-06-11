@@ -1,0 +1,4 @@
+aiohttp>=3.9.3
+aiofiles>=23.2.1
+sendgrid>=6.10.0
+requests>=2.31.0
