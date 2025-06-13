@@ -194,3 +194,8 @@ cython_debug/
 .cursorindexingignore
 
 config.json
+
+*.txt
+*.bak
+*.json
+*.csv

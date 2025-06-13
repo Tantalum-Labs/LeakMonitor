@@ -55,7 +55,7 @@ def get_aws_bucket_url(bucket_name):
             buckets.append(final_url)
             return buckets
         else:
-            print("[!] Region header not found. Bucket may not exist or is blocking unauthenticated access.")
+            print(f"[!] Region header not found. Bucket {bucket_name} may not exist or is blocking unauthenticated access.")
             print(f"[*] Response code: {response.status_code}")
             return []
 
@@ -113,12 +113,13 @@ async def check_storage_access(session, bucket):
     results_checked = await asyncio.gather(*checks)
     return [r for r in results_checked if r is not None]
 
-async def perform_dorking(buckets):
+async def perform_dorking(subdomains):
     logger.info("Starting SerpApi-based dorking...")
     findings = []
     raw_logs = []
 
     filetypes = config["file_types"]
+    max_pages = config["max_pages"]
     search_engines = config.get("search_engines", ["google", "bing"])
     api_key = config["serpapi_key"]
     filetype_part = " OR ".join([f"filetype:{ft}" for ft in filetypes])
@@ -154,19 +155,18 @@ async def perform_dorking(buckets):
         return results
 
     total_results_overall = 0
-    random.shuffle(buckets)
+    random.shuffle(subdomains)
 
     async with aiohttp.ClientSession() as session:
-        for bucket in buckets:
-            query = f"site:{bucket} ({filetype_part})"
+        for subdomain in subdomains:
+            query = f"site:{subdomain} ({filetype_part})"
             for engine in search_engines:
-                logger.info(f"{engine.upper()} running for {bucket}...")
+                logger.info(f"{engine.upper()} running for {subdomain}...")
 
                 collected_urls = set()
                 page_count = 0
                 page_size = 10
                 start = 0
-                max_pages = 20
                 total_results = 0
                 retry_attempts = 0
 
@@ -189,19 +189,19 @@ async def perform_dorking(buckets):
                     try:
                         async with session.get("https://serpapi.com/search", params=params, timeout=60) as resp:
                             if resp.status != 200:
-                                logger.warning(f"SerpApi {engine} search failed for {bucket} ({resp.status})")
+                                logger.warning(f"SerpApi {engine} search failed for {subdomain} ({resp.status})")
                                 break
 
                             data = await resp.json()
-                            raw_logs.append({"engine": engine, "bucket": bucket, "data": data})
+                            raw_logs.append({"engine": engine, "bucket": subdomain, "data": data})
 
                             organic = data.get("organic_results", [])
                             if not organic:
-                                logger.info(f"{engine.upper()} page {page_count+1} returned 0 results for {bucket}")
+                                logger.info(f"{engine.upper()} page {page_count+1} returned 0 results for {subdomain}")
                                 if engine == "bing" and page_count == 0 and retry_attempts < 2:
                                     retry_attempts += 1
                                     wait = random.uniform(2.0, 4.0)
-                                    logger.info(f"Retrying Bing page 1 for {bucket} (attempt {retry_attempts}) after {wait:.1f}s...")
+                                    logger.info(f"Retrying Bing page 1 for {subdomain} (attempt {retry_attempts}) after {wait:.1f}s...")
                                     await asyncio.sleep(wait)
                                     continue
                                 break
@@ -221,16 +221,16 @@ async def perform_dorking(buckets):
 
                             await asyncio.sleep(random.uniform(1.5, 3.0))  # Delay between pages
                     except Exception as e:
-                        logger.warning(f"SerpApi {engine} query error for {bucket}: {e}")
+                        logger.warning(f"SerpApi {engine} query error for {subdomain}: {e}")
                         break
 
-                logger.info(f"{engine.upper()} total unique URLs for {bucket}: {len(collected_urls)}")
+                logger.info(f"{engine.upper()} total unique URLs for {subdomain}: {len(collected_urls)}")
 
                 access_results = await check_urls_accessible(session, list(collected_urls))
                 for url, readable, status, severity in access_results:
                     ext = pathlib.Path(url).suffix.lower().lstrip(".")
                     findings.append({
-                        "bucket": bucket,
+                        "bucket": subdomain,
                         "file_url": url,
                         "source": engine,
                         "readable": readable,
@@ -354,7 +354,7 @@ async def main():
         print("Usage: python leak_monitor.py <bucket_list.txt> <customer_name> <notify|silent>")
         sys.exit(1)
 
-    buckets_file = sys.argv[1]
+    subdomains_file = sys.argv[1]
     customer_name = sys.argv[2]
     send_notifications = sys.argv[3]
     base_name = customer_name
@@ -368,18 +368,22 @@ async def main():
     file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s'))
     logger.addHandler(file_handler)
 
-    logger.info(f"Starting run for input file: {buckets_file}")
+    logger.info(f"Starting run for input file: {subdomains_file}")
     await load_config()
 
-    with open(buckets_file) as f:
+    all_subdomains = []
+
+    with open(subdomains_file) as f:
         lines = f.readlines()
 
     for line in lines:
         line = line.strip()
         buckets = get_aws_bucket_url(line)
         dedupe_buckets.update(buckets)
+        all_subdomains.append(line)
 
     all_buckets = list(dedupe_buckets)
+    all_subdomains = list(set(all_subdomains))
 
     logger.info(f"Total buckets to assess: {len(all_buckets)}")
 
@@ -408,7 +412,7 @@ async def main():
     else:
         logger.info("No publicly accessible buckets found.")
 
-    dork_findings, dork_total_findings_count = await perform_dorking(all_buckets)
+    dork_findings, dork_total_findings_count = await perform_dorking(all_subdomains)
 
     for r in dork_findings:
         r["type"] = "search_engine"
